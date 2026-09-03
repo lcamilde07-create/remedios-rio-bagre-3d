@@ -1,62 +1,148 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="es">
 <head>
-	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-	<title>Remedios-Rio Bagre - 22/7/2026 - 3D</title>
-	<link rel="stylesheet" href="potree/build/potree/potree.css">
-	<link rel="stylesheet" href="potree/libs/jquery-ui/jquery-ui.min.css">
-	<link rel="stylesheet" href="potree/libs/openlayers3/ol.css">
-	<link rel="stylesheet" href="potree/libs/spectrum/spectrum.css">
-	<link rel="stylesheet" href="potree/libs/jstree/themes/mixed/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Modelo 3D — Remedios, Río Bagre (22/7/2026)</title>
+<style>
+  html,body{margin:0;height:100%;background:#14161a;color:#e8e8e8;font-family:system-ui,sans-serif;overflow:hidden}
+  header{position:fixed;top:0;left:0;right:0;padding:10px 16px;background:rgba(20,22,25,.85);backdrop-filter:blur(6px);z-index:10}
+  header h1{margin:0;font-size:15px;font-weight:600}
+  header p{margin:2px 0 0;font-size:12px;color:#9aa0a6}
+  #c{width:100%;height:100%;display:block;touch-action:none}
+  #ui{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);display:flex;gap:8px;z-index:10}
+  #ui button{background:rgba(30,33,38,.9);color:#e8e8e8;border:1px solid #3a3f46;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
+  #ui button:hover{background:#2c3037}
+  #load{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;background:#14161a;z-index:20;transition:opacity .4s}
+  #bar{width:220px;height:4px;background:#2c3037;border-radius:2px;overflow:hidden}
+  #bar i{display:block;height:100%;width:0;background:#4a90d9}
+</style>
 </head>
 <body>
-	<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
-	<script src="potree/libs/spectrum/spectrum.js"></script>
-	<script src="potree/libs/jquery-ui/jquery-ui.min.js"></script>
-	<script src="potree/libs/other/BinaryHeap.js"></script>
-	<script src="potree/libs/tween/tween.min.js"></script>
-	<script src="potree/libs/d3/d3.js"></script>
-	<script src="potree/libs/proj4/proj4.js"></script>
-	<script src="potree/libs/openlayers3/ol.js"></script>
-	<script src="potree/libs/i18next/i18next.js"></script>
-	<script src="potree/libs/jstree/jstree.js"></script>
-	<script src="potree/build/potree/potree.js"></script>
-	<script src="potree/libs/plasio/js/laslaz.js"></script>
+<header>
+  <h1>Modelo 3D — Remedios, Río Bagre</h1>
+  <p>Vuelo 22/7/2026 · Arrastrar: rotar · Rueda: zoom · Clic derecho o 2 dedos: mover · Doble clic: centrar ahí</p>
+</header>
+<canvas id="c"></canvas>
+<div id="ui">
+  <button id="bTop">Vista de planta</button>
+  <button id="b3d">Vista 3D</button>
+  <button id="bReset">Restablecer</button>
+  <button onclick="location.href='nube/'">Nube de puntos</button>
+</div>
+<div id="load"><div>Cargando modelo (19&nbsp;MB)…</div><div id="bar"><i></i></div></div>
 
-	<div class="potree_container" style="position: absolute; width: 100%; height: 100%; left: 0; top: 0;">
-		<div id="potree_render_area"></div>
-		<div id="potree_sidebar_container"></div>
-	</div>
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
 
-	<script>
-		window.viewer = new Potree.Viewer(document.getElementById("potree_render_area"));
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14161a);
+const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 100000);
 
-		viewer.setEDLEnabled(true);
-		viewer.setFOV(60);
-		viewer.setPointBudget(8_000_000);
-		viewer.setMinNodeSize(0);
-		viewer.useHQ = true;
-		viewer.setBackground("gradient");
-		viewer.setDescription("Remedios-Rio Bagre - 22/7/2026");
+scene.add(new THREE.AmbientLight(0xffffff, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(1,2,1);
+scene.add(sun);
 
-		viewer.loadGUI(() => {
-			viewer.setLanguage('es');
-			$("#menu_tools").next().show();
-			$("#menu_appearance").next().show();
-			viewer.toggleSidebar();
-		});
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.6;
+controls.panSpeed = 0.9;
+controls.zoomSpeed = 1.1;
+controls.screenSpacePanning = false;   // el paneo sigue el terreno, no la pantalla
+controls.maxPolarAngle = Math.PI/2 - 0.02; // nunca por debajo del suelo
+controls.minDistance = 5;
 
-		Potree.loadPointCloud("entwine_pointcloud/ept.json", "Remedios-Rio Bagre", e => {
-			let pointcloud = e.pointcloud;
-			let material = pointcloud.material;
-			material.size = 0.7;
-			material.pointSizeType = Potree.PointSizeType.ADAPTIVE;
-			material.shape = Potree.PointShape.CIRCLE;
-			material.activeAttributeName = "rgba";
-			viewer.scene.addPointCloud(pointcloud);
-			viewer.fitToScreen();
-		});
-	</script>
+let home = null; // posiciÃ³n inicial
+let ground = 0, radius = 100, center = new THREE.Vector3();
+
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/gltf/');
+const loader = new GLTFLoader();
+loader.setDRACOLoader(draco);
+loader.load('modelo.glb', gltf => {
+  const model = gltf.scene;
+  scene.add(model);
+
+  // Centrar y orientar: si el modelo viene Z-arriba (tÃ­pico de fotogrametrÃ­a), acostarlo
+  let box = new THREE.Box3().setFromObject(model);
+  let size = box.getSize(new THREE.Vector3());
+  if (size.y > size.z * 1.5) {           // el terreno "sube" en Y => el modelo es Z-up: acostarlo
+    model.rotation.x = -Math.PI/2;
+  }
+  box = new THREE.Box3().setFromObject(model);
+  box.getCenter(center);
+  model.position.sub(center);
+  box = new THREE.Box3().setFromObject(model);
+  box.getCenter(center);
+  size = box.getSize(new THREE.Vector3());
+  radius = Math.max(size.x, size.z) / 2;
+  ground = box.min.y;
+
+  controls.maxDistance = radius * 6;
+  view3d(false);
+  home = {pos: camera.position.clone(), tgt: controls.target.clone()};
+  document.getElementById('load').style.opacity = 0;
+  setTimeout(()=>document.getElementById('load').remove(), 450);
+}, ev => {
+  if (ev.total) document.querySelector('#bar i').style.width = (100*ev.loaded/ev.total)+'%';
+});
+
+function flyTo(pos, tgt){
+  const p0=camera.position.clone(), t0=controls.target.clone(), start=performance.now(), dur=700;
+  (function step(){
+    const k=Math.min(1,(performance.now()-start)/dur), e=k<.5?2*k*k:1-Math.pow(-2*k+2,2)/2;
+    camera.position.lerpVectors(p0,pos,e);
+    controls.target.lerpVectors(t0,tgt,e);
+    if(k<1) requestAnimationFrame(step);
+  })();
+}
+function view3d(fly=true){
+  const pos=new THREE.Vector3(center.x, ground+radius*0.9, center.z+radius*1.4);
+  const tgt=new THREE.Vector3(center.x, ground, center.z);
+  fly?flyTo(pos,tgt):(camera.position.copy(pos),controls.target.copy(tgt));
+}
+function viewTop(){
+  flyTo(new THREE.Vector3(center.x, ground+radius*2.6, center.z+0.001),
+        new THREE.Vector3(center.x, ground, center.z));
+}
+document.getElementById('bTop').onclick = viewTop;
+document.getElementById('b3d').onclick = ()=>view3d();
+document.getElementById('bReset').onclick = ()=>{ if(home) flyTo(home.pos.clone(), home.tgt.clone()); };
+
+// Doble clic: recentrar la Ã³rbita en el punto del terreno clicado
+const ray = new THREE.Raycaster(), mouse = new THREE.Vector2();
+canvas.addEventListener('dblclick', e=>{
+  mouse.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1);
+  ray.setFromCamera(mouse, camera);
+  const hit = ray.intersectObjects(scene.children, true)[0];
+  if(hit){
+    const off = camera.position.clone().sub(controls.target).multiplyScalar(0.6);
+    flyTo(hit.point.clone().add(off), hit.point.clone());
+  }
+});
+
+function resize(){
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+renderer.setAnimationLoop(()=>{ controls.update(); renderer.render(scene, camera); });
+</script>
 </body>
 </html>
