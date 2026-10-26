@@ -29,6 +29,21 @@
   <button id="b3d">Vista 3D</button>
   <button id="bReset">Restablecer</button>
   <button onclick="location.href='nube/'">Nube de puntos</button>
+  <button id="bWind">Viento: ON</button>
+</div>
+<div id="met" style="position:fixed;top:64px;right:12px;z-index:10;background:rgba(20,22,25,.88);border:1px solid #3a3f46;border-radius:10px;padding:12px 14px;width:230px;font-size:12px;backdrop-filter:blur(6px)">
+  <div style="font-weight:600;font-size:13px;margin-bottom:8px">Simulación meteorológica</div>
+  <label style="display:block;margin-bottom:6px">Dirección (de dónde viene)
+    <select id="mDir" style="width:100%;margin-top:2px;background:#1e2126;color:#e8e8e8;border:1px solid #3a3f46;border-radius:6px;padding:4px">
+      <option>N</option><option>NE</option><option>E</option><option>SE</option><option selected>S</option><option>SO</option><option>O</option><option>NO</option>
+    </select></label>
+  <label style="display:block;margin-bottom:6px">Velocidad: <b id="mVelV">8</b> km/h
+    <input id="mVel" type="range" min="0" max="60" value="8" style="width:100%"></label>
+  <label style="display:block;margin-bottom:6px">Lluvia: <b id="mLluV">0</b> mm/h
+    <input id="mLlu" type="range" min="0" max="50" value="0" style="width:100%"></label>
+  <label style="display:block;margin-bottom:6px">Ajuste del norte: <b id="mNorV">0</b>°
+    <input id="mNor" type="range" min="-180" max="180" value="0" style="width:100%"></label>
+  <div style="color:#9aa0a6;line-height:1.4">Por defecto: viento del <b>Sur</b>, el sector predominante registrado por la estación del relleno (43 de 99 lecturas). Ajusta velocidad y lluvia con los datos del tablero (PLU). La animación es ilustrativa del flujo sobre el terreno, no una modelación de dispersión.</div>
 </div>
 <div id="load"><div>Cargando modelo (19&nbsp;MB)…</div><div id="bar"><i></i></div></div>
 
@@ -95,6 +110,8 @@ loader.load('modelo.glb', gltf => {
   controls.maxDistance = radius * 6;
   view3d(false);
   home = {pos: camera.position.clone(), tgt: controls.target.clone()};
+  buildHeightGrid();
+  initWind();
   document.getElementById('load').style.opacity = 0;
   setTimeout(()=>document.getElementById('load').remove(), 450);
 }, ev => {
@@ -142,7 +159,125 @@ function resize(){
 }
 addEventListener('resize', resize); resize();
 
-renderer.setAnimationLoop(()=>{ controls.update(); renderer.render(scene, camera); });
+/* ================= Simulación de viento y lluvia (estilo meteoblue) ================= */
+let windOn = true, heightGrid = null, HG = 72;
+let windLines = null, windData = null, rainPts = null, rainData = null;
+const met = {dir:'S', vel:8, lluvia:0, norte:0};
+const DIR_ANG = {N:0, NE:45, E:90, SE:135, S:180, SO:225, O:270, NO:315};
+
+function buildHeightGrid(){
+  heightGrid = new Float32Array(HG*HG);
+  const rc = new THREE.Raycaster();
+  const top = ground + radius*4;
+  const box = {minX:center.x-radius, minZ:center.z-radius, w:2*radius, h:2*radius};
+  for(let i=0;i<HG;i++)for(let j=0;j<HG;j++){
+    const x = box.minX + box.w*i/(HG-1), z = box.minZ + box.h*j/(HG-1);
+    rc.set(new THREE.Vector3(x, top, z), new THREE.Vector3(0,-1,0));
+    const hit = rc.intersectObjects(scene.children, true)[0];
+    heightGrid[i*HG+j] = hit ? hit.point.y : ground;
+  }
+  heightGrid._box = box;
+}
+function hAt(x,z){
+  if(!heightGrid) return ground;
+  const b = heightGrid._box;
+  let u = (x-b.minX)/b.w*(HG-1), v = (z-b.minZ)/b.h*(HG-1);
+  u = Math.max(0, Math.min(HG-1.001, u)); v = Math.max(0, Math.min(HG-1.001, v));
+  const i0=u|0, j0=v|0, fu=u-i0, fv=v-j0;
+  const h00=heightGrid[i0*HG+j0], h10=heightGrid[(i0+1)*HG+j0], h01=heightGrid[i0*HG+j0+1], h11=heightGrid[(i0+1)*HG+j0+1];
+  return (h00*(1-fu)+h10*fu)*(1-fv)+(h01*(1-fu)+h11*fu)*fv;
+}
+function windVec(){
+  // meteorológica: la dirección es de dónde VIENE; el flujo va al sector opuesto.
+  const ang = (DIR_ANG[met.dir]+met.norte+180)*Math.PI/180;
+  const ms = met.vel/3.6; // km/h -> m/s (el modelo está en metros)
+  return {x: Math.sin(ang)*ms, z: -Math.cos(ang)*ms};
+}
+function initWind(){
+  const N = 2200;
+  windData = {n:N, p:new Float32Array(N*2), age:new Float32Array(N), spd:new Float32Array(N)};
+  const pos = new Float32Array(N*2*3);
+  for(let i=0;i<N;i++) respawn(i);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  const mat = new THREE.LineBasicMaterial({color:0x9fd8ff, transparent:true, opacity:0.55, blending:THREE.AdditiveBlending, depthWrite:false});
+  windLines = new THREE.LineSegments(geo, mat);
+  windLines.frustumCulled = false;
+  scene.add(windLines);
+  const RN = 1600, rpos = new Float32Array(RN*3);
+  rainData = {n:RN, y:new Float32Array(RN)};
+  for(let i=0;i<RN;i++){
+    rpos[i*3]   = center.x+(Math.random()*2-1)*radius;
+    rpos[i*3+1] = ground+Math.random()*radius;
+    rpos[i*3+2] = center.z+(Math.random()*2-1)*radius;
+  }
+  const rgeo = new THREE.BufferGeometry();
+  rgeo.setAttribute('position', new THREE.BufferAttribute(rpos,3));
+  rainPts = new THREE.Points(rgeo, new THREE.PointsMaterial({color:0x7db9ea, size:Math.max(radius/400,0.6), transparent:true, opacity:0.6, depthWrite:false}));
+  rainPts.frustumCulled = false; rainPts.visible = false;
+  scene.add(rainPts);
+}
+function respawn(i){
+  windData.p[i*2]   = center.x+(Math.random()*2-1)*radius;
+  windData.p[i*2+1] = center.z+(Math.random()*2-1)*radius;
+  windData.age[i] = 60+Math.random()*240;
+  windData.spd[i] = 0.6+Math.random()*0.8;
+}
+function stepWind(dt){
+  if(!windData) return;
+  const w = windVec(), arr = windLines.geometry.attributes.position.array;
+  const tail = Math.max(2, Math.min(radius/30, 1+met.vel/4)); // largo de estela según velocidad
+  const stop = met.vel<=0;
+  for(let i=0;i<windData.n;i++){
+    if(--windData.age[i]<=0) respawn(i);
+    let x=windData.p[i*2], z=windData.p[i*2+1];
+    if(!stop){
+      x += w.x*dt*windData.spd[i]*6;  // ×6: escala visual para que el flujo se aprecie
+      z += w.z*dt*windData.spd[i]*6;
+    }
+    if(Math.abs(x-center.x)>radius||Math.abs(z-center.z)>radius) {respawn(i); x=windData.p[i*2]; z=windData.p[i*2+1];}
+    windData.p[i*2]=x; windData.p[i*2+1]=z;
+    const y = hAt(x,z)+2+windData.spd[i]*5;
+    const L = stop?0.4:tail;
+    const nx = Math.hypot(w.x,w.z)||1;
+    arr[i*6]=x;              arr[i*6+1]=y;  arr[i*6+2]=z;
+    arr[i*6+3]=x-w.x/nx*L;   arr[i*6+4]=y;  arr[i*6+5]=z-w.z/nx*L;
+  }
+  windLines.geometry.attributes.position.needsUpdate = true;
+  windLines.material.opacity = stop?0.15:Math.min(0.75, 0.3+met.vel/40);
+  rainPts.visible = windOn && met.lluvia>0;
+  if(rainPts.visible){
+    const rp = rainPts.geometry.attributes.position.array, fall=(4+met.lluvia/2)*dt*8;
+    for(let i=0;i<rainData.n;i++){
+      rp[i*3+1]-=fall; rp[i*3]+=w.x*dt*2; rp[i*3+2]+=w.z*dt*2;
+      if(rp[i*3+1]<hAt(rp[i*3],rp[i*3+2])){
+        rp[i*3]=center.x+(Math.random()*2-1)*radius;
+        rp[i*3+1]=ground+radius*(0.5+Math.random()*0.5);
+        rp[i*3+2]=center.z+(Math.random()*2-1)*radius;
+      }
+    }
+    rainPts.geometry.attributes.position.needsUpdate = true;
+    rainPts.material.opacity = Math.min(0.8, 0.25+met.lluvia/40);
+  }
+}
+document.getElementById('mDir').onchange = e=>met.dir=e.target.value;
+document.getElementById('mVel').oninput = e=>{met.vel=+e.target.value;document.getElementById('mVelV').textContent=met.vel};
+document.getElementById('mLlu').oninput = e=>{met.lluvia=+e.target.value;document.getElementById('mLluV').textContent=met.lluvia};
+document.getElementById('mNor').oninput = e=>{met.norte=+e.target.value;document.getElementById('mNorV').textContent=met.norte};
+document.getElementById('bWind').onclick = ()=>{
+  windOn=!windOn;
+  document.getElementById('bWind').textContent='Viento: '+(windOn?'ON':'OFF');
+  if(windLines) windLines.visible=windOn;
+  document.getElementById('met').style.display=windOn?'block':'none';
+};
+
+let lastT = performance.now();
+renderer.setAnimationLoop(()=>{
+  const now = performance.now(), dt = Math.min(0.05,(now-lastT)/1000); lastT = now;
+  controls.update();
+  if(windOn && windLines) stepWind(dt);
+  renderer.render(scene, camera);
+});
 </script>
 </body>
 </html>
