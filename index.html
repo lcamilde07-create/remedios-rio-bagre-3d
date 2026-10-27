@@ -125,8 +125,9 @@ loader.load('modelo.glb', gltf => {
   radius = Math.max(size.x, size.z) / 2;
   ground = box.min.y;
 
-  controls.maxDistance = radius * 6;
+  controls.maxDistance = radius * 9;
   view3d(false);
+  if (MODO_TABLERO) camera.position.set(center.x, ground+radius*3.4, center.z+radius*4.6);
   home = {pos: camera.position.clone(), tgt: controls.target.clone()};
   buildHeightGrid();
   initWind();
@@ -295,8 +296,21 @@ document.getElementById('bWind').onclick = ()=>{
 // Georreferenciación: la nube de puntos (ept.json) está en WGS84 / UTM zona 18N, la zona de Segovia (Antioquia).
 // El GLB guarda Este/Norte relativos al origen de la nube y la elevación absoluta.
 const ORIGEN_UTM = {e:534994, n:783034, zona:18};
-// Vecinos / receptores sensibles en UTM 18N (Este, Norte). Se cargan aquí para que nadie pueda moverlos desde la página.
-const RECEPTORES = [];
+// Vecinos / receptores sensibles (lat, lon WGS84). Se cargan aquí para que nadie pueda moverlos desde la página.
+// Fuente: OpenStreetMap (lugares con nombre y viviendas mapeadas a menos de 5 km), consulta del 26-oct-2026.
+const RECEPTORES = [
+  {nombre:'Vivienda', lat:7.080331, lon:-74.696083},
+  {nombre:'Segovia (casco urbano)', lat:7.081679, lon:-74.700909},
+  {nombre:'El Aporriado', lat:7.105706, lon:-74.677735},
+  {nombre:'La Cianurada', lat:7.104630, lon:-74.668470},
+  {nombre:'Campo Alegre', lat:7.099712, lon:-74.703893},
+  {nombre:'Marmajón', lat:7.062173, lon:-74.694635},
+  {nombre:'Juan Brand', lat:7.056160, lon:-74.683506},
+  {nombre:'Juan Bran', lat:7.063330, lon:-74.646954},
+  {nombre:'La Cruzada', lat:7.070336, lon:-74.714647},
+  {nombre:'Candelaria', lat:7.052655, lon:-74.662272},
+  {nombre:'Cecilia', lat:7.081852, lon:-74.727588}
+];
 const SECT = ['N','NE','E','SE','S','SO','O','NO'];
 const SECT_NOMBRE = {N:'Norte',NE:'Noreste',E:'Este',SE:'Sureste',S:'Sur',SO:'Suroeste',O:'Oeste',NO:'Noroeste'};
 const MODO_TABLERO = new URLSearchParams(location.search).get('modo') === 'tablero';
@@ -391,35 +405,42 @@ function dibujarExposicion(){
   const nM=new THREE.Mesh(nGeo,new THREE.MeshBasicMaterial({color:0xe5484d}));
   nM.position.set(0, yAnillo+2, -radius*0.92); expoGrupo.add(nM);
   const nL=etiqueta('N','#e5484d'); nL.position.set(0,yAnillo+radius*0.1,-radius*1.0); nL.scale.set(radius*0.16,radius*0.06,1); expoGrupo.add(nL);
-  // anillos de distancia desde el centro del modelo
-  [250,500].forEach(d=>{
-    const pts=[]; for(let k=0;k<=96;k++){const a=k/96*Math.PI*2; pts.push(new THREE.Vector3(Math.cos(a)*d,yAnillo,Math.sin(a)*d));}
-    const g=new THREE.BufferGeometry().setFromPoints(pts);
-    const ln=new THREE.Line(g,new THREE.LineDashedMaterial({color:0x9aa0a6,dashSize:8,gapSize:6,transparent:true,opacity:.6}));
-    ln.computeLineDistances(); expoGrupo.add(ln);
-    const lb=etiqueta(d+' m','#c8ccd2'); lb.scale.set(radius*0.14,radius*0.05,1); lb.position.set(d*0.71,yAnillo+3,d*0.71); expoGrupo.add(lb);
-  });
   // receptores registrados
   const recInfo=[];
   RECEPTORES.forEach(rc=>{
-    const x = rc.e-ORIGEN_UTM.e-geoShift.x, z = -(rc.n-ORIGEN_UTM.n)-geoShift.z;
-    const dist=Math.hypot(x,z), rumbo=(Math.atan2(x,-z)*180/Math.PI+360)%360;
+    const u = geoATM(rc.lat, rc.lon, 0, -75, 0.9996, 500000, 0);   // a UTM 18N, el sistema del modelo
+    const xr = u.e-ORIGEN_UTM.e-geoShift.x, zr = -(u.n-ORIGEN_UTM.n)-geoShift.z;
+    const dist=Math.hypot(xr,zr), rumbo=(Math.atan2(xr,-zr)*180/Math.PI+360)%360;
     const sec=SECT[Math.round(rumbo/45)%8], pct=suma?100*tot[sec]/suma:0;
-    const poste=new THREE.Mesh(new THREE.CylinderGeometry(1.2,1.2,radius*0.15,8),new THREE.MeshBasicMaterial({color:colorRel(tot[sec]/max)}));
-    poste.position.set(x, hAt(x,z)+radius*0.075, z); expoGrupo.add(poste);
-    const lb=etiqueta(rc.nombre+'\n'+Math.round(pct)+' %','#ffffff'); lb.position.set(x,hAt(x,z)+radius*0.2,z); expoGrupo.add(lb);
+    // dirección real, distancia comprimida (escala logarítmica) para que quepan junto al modelo
+    const dv = radius*(2.05 + 0.55*Math.log2(Math.max(dist,500)/500)), ar=rumbo*Math.PI/180;
+    const x = Math.sin(ar)*dv, z = -Math.cos(ar)*dv;
+    const col = colorRel(max>1e-9&&suma?tot[sec]/max:0);
+    const poste=new THREE.Mesh(new THREE.CylinderGeometry(radius*0.012,radius*0.012,radius*0.22,10),new THREE.MeshBasicMaterial({color:col}));
+    poste.position.set(x, yAnillo+radius*0.11, z); expoGrupo.add(poste);
+    const lb=etiqueta(rc.nombre+'\n'+(dist/1000).toFixed(1)+' km · '+Math.round(pct)+' %','#'+col.getHexString());
+    lb.scale.set(radius*0.42, radius*0.14, 1);
+    lb.position.set(x, yAnillo+radius*0.3, z); expoGrupo.add(lb);
     recInfo.push({n:rc.nombre,dist,sec,pct});
   });
   scene.add(expoGrupo);
   // panel
   const orden=SECT.slice().sort((a,b)=>tot[b]-tot[a]);
   document.getElementById('expoTop').innerHTML = suma ?
-    'Sector más expuesto: <b style="color:#'+colorRel(1).getHexString()+'">hacia el '+SECT_NOMBRE[orden[0]]+'</b> ('+Math.round(100*tot[orden[0]]/suma)+' % de la intensidad). Los vecinos ubicados al '+SECT_NOMBRE[orden[0]].toLowerCase()+' del relleno fueron los que más recibieron el viento que pasa sobre el frente de trabajo.' :
+    'Sector más expuesto: <b style="color:#'+colorRel(1).getHexString()+'">hacia el '+SECT_NOMBRE[orden[0]]+'</b> ('+Math.round(100*tot[orden[0]]/suma)+' % de la intensidad). Los vecinos ubicados al '+SECT_NOMBRE[orden[0]].toLowerCase()+' del relleno fueron los que más recibieron el viento que pasa sobre el frente de trabajo.'+
+    (function(){
+      if(!recInfo.length) return '';
+      const enTop=recInfo.filter(r=>r.sec===orden[0]);
+      const masExp=recInfo.slice().sort((a,b)=>b.pct-a.pct||a.dist-b.dist)[0];
+      if(enTop.length) return ' Poblado mapeado en ese sector: <b>'+enTop.sort((a,b)=>a.dist-b.dist).map(r=>r.n+' ('+(r.dist/1000).toFixed(1)+' km)').join(', ')+'</b>.';
+      return masExp.pct>0 ? ' En ese sector OpenStreetMap no tiene poblados mapeados; el vecino registrado más expuesto es <b>'+masExp.n+'</b> ('+Math.round(masExp.pct)+' %, '+(masExp.dist/1000).toFixed(1)+' km al '+SECT_NOMBRE[masExp.sec].toLowerCase()+').' : '';
+    })() :
     'En el periodo solo hubo calmas o direcciones sin dato: no hay sector expuesto.';
   document.getElementById('expoTab').innerHTML = '<tr style="color:#9aa0a6"><td>Hacia</td><td style="text-align:right">km/h acum.</td><td style="text-align:right">%</td></tr>'+
     orden.map(s=>'<tr><td><span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;background:#'+colorRel(tot[s]/max).getHexString()+'"></span>'+SECT_NOMBRE[s]+'</td><td style="text-align:right">'+tot[s].toFixed(1)+'</td><td style="text-align:right">'+(suma?Math.round(100*tot[s]/suma):0)+'</td></tr>').join('');
   document.getElementById('expoRec').innerHTML = recInfo.length ?
-    '<b>Vecinos registrados</b><br>'+recInfo.sort((a,b)=>b.pct-a.pct).map(r=>r.n+': '+Math.round(r.pct)+' % · '+Math.round(r.dist)+' m al '+SECT_NOMBRE[r.sec]).join('<br>') :
+    '<b>Vecinos (OpenStreetMap)</b><br>'+recInfo.sort((a,b)=>b.pct-a.pct||a.dist-b.dist).map((r,i)=>(i===0&&r.pct>0?'<b>':'')+r.n+': '+Math.round(r.pct)+' % · '+(r.dist/1000).toFixed(1)+' km al '+SECT_NOMBRE[r.sec]+(i===0&&r.pct>0?'</b>':'')).join('<br>')+
+    '<div style="color:#9aa0a6;margin-top:4px">En la vista 3D cada poblado está en su dirección real; la distancia en pantalla va comprimida y la real aparece en la etiqueta. La exposición se asigna por sector de 45°; no considera relieve ni dispersión.</div>' :
     '<span style="color:#9aa0a6">Aún no hay vecinos georreferenciados en el visor; cuando se carguen sus coordenadas aparecerán aquí con su porcentaje de exposición.</span>';
 }
 
