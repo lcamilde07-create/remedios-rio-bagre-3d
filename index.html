@@ -45,6 +45,22 @@
     <input id="mNor" type="range" min="-180" max="180" value="0" style="width:100%"></label>
   <div style="color:#9aa0a6;line-height:1.4">Por defecto: viento del <b>Sur</b>, el sector predominante registrado por la estación del relleno (43 de 99 lecturas). Ajusta velocidad y lluvia con los datos del tablero (PLU). La animación es ilustrativa del flujo sobre el terreno, no una modelación de dispersión.</div>
 </div>
+<div id="hud" style="display:none;position:fixed;top:12px;left:12px;z-index:11;background:rgba(20,22,25,.9);border:1px solid #3a3f46;border-radius:10px;padding:10px 14px;width:290px;font-size:12px;backdrop-filter:blur(6px)">
+  <div style="font-weight:600;font-size:13px">Viento registrado · últimos días</div>
+  <div id="hudFecha" style="color:#9fd8ff;font-size:15px;font-weight:600;margin:4px 0">—</div>
+  <div id="hudDatos" style="line-height:1.5">—</div>
+  <div id="hudLinea" style="display:flex;gap:2px;margin-top:8px;height:8px"></div>
+  <div id="hudRango" style="color:#9aa0a6;margin-top:4px">—</div>
+</div>
+<div id="expo" style="display:none;position:fixed;top:12px;right:12px;z-index:11;background:rgba(20,22,25,.9);border:1px solid #3a3f46;border-radius:10px;padding:10px 14px;width:270px;font-size:12px;backdrop-filter:blur(6px);max-height:calc(100% - 120px);overflow:auto">
+  <div style="font-weight:600;font-size:13px">Exposición a sotavento</div>
+  <div id="expoTop" style="margin:6px 0;line-height:1.45"></div>
+  <table id="expoTab" style="width:100%;border-collapse:collapse;font-size:11.5px"></table>
+  <div id="expoRec" style="margin-top:8px;line-height:1.45"></div>
+  <div style="color:#9aa0a6;margin-top:8px;line-height:1.4">Intensidad = suma de velocidades (km/h) de las lecturas cuyo viento sopla hacia cada sector. Las calmas no suman. Convención meteorológica: la dirección registrada es de dónde viene el viento; el aire, el olor y el polvo se desplazan al sector opuesto.</div>
+</div>
+<div id="coord" style="display:none;position:fixed;left:12px;bottom:12px;z-index:11;background:rgba(20,22,25,.9);border:1px solid #3a3f46;border-radius:8px;padding:7px 11px;font-size:11.5px;line-height:1.45;font-family:ui-monospace,Consolas,monospace">Pase el cursor sobre el terreno</div>
+<div id="brujula" style="position:fixed;right:16px;bottom:16px;z-index:11;width:58px;height:58px;border-radius:50%;background:rgba(20,22,25,.85);border:1px solid #3a3f46;display:flex;align-items:center;justify-content:center"><svg id="brujulaSvg" width="46" height="46" viewBox="-23 -23 46 46" aria-label="Norte"><polygon points="0,-19 6,2 0,-2 -6,2" fill="#e5484d"/><polygon points="0,19 6,-2 0,2 -6,-2" fill="#9aa0a6"/><text x="0" y="-8" text-anchor="middle" font-size="0"></text></svg><span style="position:absolute;top:2px;font-size:10px;font-weight:700;color:#e5484d">N</span></div>
 <div id="load"><div>Cargando modelo (19&nbsp;MB)…</div><div id="bar"><i></i></div></div>
 
 <script type="importmap">
@@ -83,6 +99,7 @@ controls.minDistance = 5;
 
 let home = null; // posiciÃ³n inicial
 let ground = 0, radius = 100, center = new THREE.Vector3();
+const geoShift = new THREE.Vector3(); // desplazamiento aplicado al centrar el modelo (para volver a coordenadas reales)
 
 const draco = new DRACOLoader();
 draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/libs/draco/gltf/');
@@ -100,6 +117,7 @@ loader.load('modelo.glb', gltf => {
   }
   box = new THREE.Box3().setFromObject(model);
   box.getCenter(center);
+  geoShift.copy(center);
   model.position.sub(center);
   box = new THREE.Box3().setFromObject(model);
   box.getCenter(center);
@@ -112,6 +130,8 @@ loader.load('modelo.glb', gltf => {
   home = {pos: camera.position.clone(), tgt: controls.target.clone()};
   buildHeightGrid();
   initWind();
+  modeloListo = true;
+  if (LECT_RAW.length) aplicarLecturas(LECT_RAW);
   document.getElementById('load').style.opacity = 0;
   setTimeout(()=>document.getElementById('load').remove(), 450);
 }, ev => {
@@ -271,11 +291,200 @@ document.getElementById('bWind').onclick = ()=>{
   document.getElementById('met').style.display=windOn?'block':'none';
 };
 
+/* ================= Modo tablero: datos reales de la estación, solo lectura ================= */
+// Georreferenciación: la nube de puntos (ept.json) está en WGS84 / UTM zona 18N, la zona de Segovia (Antioquia).
+// El GLB guarda Este/Norte relativos al origen de la nube y la elevación absoluta.
+const ORIGEN_UTM = {e:534994, n:783034, zona:18};
+// Vecinos / receptores sensibles en UTM 18N (Este, Norte). Se cargan aquí para que nadie pueda moverlos desde la página.
+const RECEPTORES = [];
+const SECT = ['N','NE','E','SE','S','SO','O','NO'];
+const SECT_NOMBRE = {N:'Norte',NE:'Noreste',E:'Este',SE:'Sureste',S:'Sur',SO:'Suroeste',O:'Oeste',NO:'Noroeste'};
+const MODO_TABLERO = new URLSearchParams(location.search).get('modo') === 'tablero';
+let LECT_RAW = [], LECTURAS = [], modeloListo = false, idxLect = 0, tLect = 0, expoGrupo = null;
+const SEG_POR_LECTURA = 5;
+
+function normDir(s){
+  s = String(s||'').toUpperCase().trim().replace(/\s+/g,'');
+  const pares = {WE:'O', EW:'E', SN:'S', NS:'N'}; // registros de eje: la primera letra es de dónde viene
+  if (pares[s]) return pares[s];
+  s = s.replace('NORTE','N').replace('SUR','S').replace('ESTE','E').replace('OESTE','O')
+       .replace('SW','SO').replace('NW','NO').replace(/^W$/,'O');
+  return SECT.includes(s) ? s : null;
+}
+function leerDatosHash(){
+  const m = location.hash.match(/[#&]d=([^&]+)/);
+  if (!m) return [];
+  try { return JSON.parse(decodeURIComponent(m[1])); } catch(e){ return []; }
+}
+function prepararLecturas(arr){
+  return (arr||[]).map(r=>({t:String(r.t||''), dir:normDir(r.dir), dirTxt:String(r.dir||''),
+      kmh:(+r.avg||0)*1.609, raf:(+r.gust||0)*1.609, mm:(+r.rin||0)*25.4}))
+    .filter(r=>r.t).sort((a,b)=>a.t<b.t?-1:1);
+}
+function aplicarLecturas(arr){
+  LECT_RAW = arr || [];
+  LECTURAS = prepararLecturas(LECT_RAW);
+  idxLect = 0; tLect = 0;
+  if (!modeloListo) return;
+  pintarLinea(); dibujarExposicion(); mostrarLectura();
+}
+function mostrarLectura(){
+  const r = LECTURAS[idxLect]; if (!r) return;
+  met.dir = r.dir || 'S';
+  met.vel = r.dir ? r.kmh : 0;          // dirección no reconocida: se muestra como calma
+  met.lluvia = Math.min(50, r.mm);
+  const f = r.t.replace('T',' ').slice(0,16);
+  document.getElementById('hudFecha').textContent = f;
+  const hacia = r.dir ? SECT[(SECT.indexOf(r.dir)+4)%8] : null;
+  document.getElementById('hudDatos').innerHTML =
+    (!r.dir ? 'Dirección sin dato reconocible ('+(r.dirTxt||'vacío')+')' : r.kmh<=0 ? '<b>Calma</b> (0 km/h)' :
+      'Viene del <b>'+SECT_NOMBRE[r.dir]+'</b> y sopla hacia el <b>'+SECT_NOMBRE[hacia]+'</b>')+
+    '<br>Velocidad media <b>'+r.kmh.toFixed(1)+' km/h</b> · ráfaga '+r.raf.toFixed(1)+' km/h'+
+    '<br>Lluvia registrada '+r.mm.toFixed(1)+' mm';
+  [...document.getElementById('hudLinea').children].forEach((c,i)=>c.style.opacity = i===idxLect?1:0.35);
+}
+function pintarLinea(){
+  const L = document.getElementById('hudLinea'); L.innerHTML='';
+  LECTURAS.forEach(r=>{
+    const s=document.createElement('span');
+    s.style.cssText='flex:1;border-radius:2px;background:'+(r.kmh>0&&r.dir?'#9fd8ff':'#5a6068');
+    s.title=r.t.slice(0,16); L.appendChild(s);
+  });
+  document.getElementById('hudRango').textContent = LECTURAS.length ?
+    LECTURAS.length+' lecturas del '+LECTURAS[0].t.slice(0,10)+' al '+LECTURAS[LECTURAS.length-1].t.slice(0,10)+' · se repiten en bucle' :
+    'Sin lecturas en los últimos días';
+}
+function etiqueta(texto, color){
+  const cv=document.createElement('canvas'); cv.width=256; cv.height=96;
+  const g=cv.getContext('2d'); g.fillStyle='rgba(20,22,25,.82)'; g.fillRect(0,0,256,96);
+  g.fillStyle=color; g.font='bold 34px system-ui'; g.textAlign='center';
+  texto.split('\n').forEach((l,i)=>g.fillText(l,128,40+i*38));
+  const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv), depthTest:false}));
+  sp.scale.set(radius*0.32, radius*0.12, 1); sp.renderOrder=10; return sp;
+}
+function colorRel(rel){ // verde → amarillo → rojo
+  const c=new THREE.Color(); c.setHSL((1-rel)*0.33, 0.85, 0.5); return c;
+}
+function dibujarExposicion(){
+  if (expoGrupo) { scene.remove(expoGrupo); expoGrupo=null; }
+  const tot={}; SECT.forEach(s=>tot[s]=0);
+  let suma=0;
+  LECTURAS.forEach(r=>{ if(r.dir&&r.kmh>0){ const h=SECT[(SECT.indexOf(r.dir)+4)%8]; tot[h]+=r.kmh; suma+=r.kmh; } });
+  const max=Math.max(...SECT.map(s=>tot[s]),1e-9);
+  expoGrupo=new THREE.Group();
+  const yAnillo = ground + 1.5;
+  SECT.forEach((s,i)=>{
+    const rel = tot[s]/max, b=i*45;
+    const outer = radius*(1.06 + 0.9*rel);
+    const geo = new THREE.RingGeometry(radius*1.04, Math.max(outer, radius*1.07), 24, 1, (90-b-21)*Math.PI/180, 42*Math.PI/180);
+    geo.rotateX(-Math.PI/2);
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({color:colorRel(rel), transparent:true, opacity:suma?0.25+0.5*rel:0.12, side:THREE.DoubleSide, depthWrite:false}));
+    mesh.position.y = yAnillo; expoGrupo.add(mesh);
+    const pct = suma? Math.round(100*tot[s]/suma):0;
+    const lab = etiqueta('Hacia '+s+'\n'+pct+' %', '#'+colorRel(rel).getHexString());
+    const rr = Math.max(outer, radius*1.07)+radius*0.12, ar=b*Math.PI/180;
+    lab.position.set(Math.sin(ar)*rr, yAnillo+radius*0.06, -Math.cos(ar)*rr);
+    expoGrupo.add(lab);
+  });
+  // flecha del norte verdadero (en UTM 18N la convergencia de meridianos aquí es < 0,1°)
+  const nGeo=new THREE.ConeGeometry(radius*0.05, radius*0.16, 16); nGeo.rotateX(-Math.PI/2);
+  const nM=new THREE.Mesh(nGeo,new THREE.MeshBasicMaterial({color:0xe5484d}));
+  nM.position.set(0, yAnillo+2, -radius*0.92); expoGrupo.add(nM);
+  const nL=etiqueta('N','#e5484d'); nL.position.set(0,yAnillo+radius*0.1,-radius*1.0); nL.scale.set(radius*0.16,radius*0.06,1); expoGrupo.add(nL);
+  // anillos de distancia desde el centro del modelo
+  [250,500].forEach(d=>{
+    const pts=[]; for(let k=0;k<=96;k++){const a=k/96*Math.PI*2; pts.push(new THREE.Vector3(Math.cos(a)*d,yAnillo,Math.sin(a)*d));}
+    const g=new THREE.BufferGeometry().setFromPoints(pts);
+    const ln=new THREE.Line(g,new THREE.LineDashedMaterial({color:0x9aa0a6,dashSize:8,gapSize:6,transparent:true,opacity:.6}));
+    ln.computeLineDistances(); expoGrupo.add(ln);
+    const lb=etiqueta(d+' m','#c8ccd2'); lb.scale.set(radius*0.14,radius*0.05,1); lb.position.set(d*0.71,yAnillo+3,d*0.71); expoGrupo.add(lb);
+  });
+  // receptores registrados
+  const recInfo=[];
+  RECEPTORES.forEach(rc=>{
+    const x = rc.e-ORIGEN_UTM.e-geoShift.x, z = -(rc.n-ORIGEN_UTM.n)-geoShift.z;
+    const dist=Math.hypot(x,z), rumbo=(Math.atan2(x,-z)*180/Math.PI+360)%360;
+    const sec=SECT[Math.round(rumbo/45)%8], pct=suma?100*tot[sec]/suma:0;
+    const poste=new THREE.Mesh(new THREE.CylinderGeometry(1.2,1.2,radius*0.15,8),new THREE.MeshBasicMaterial({color:colorRel(tot[sec]/max)}));
+    poste.position.set(x, hAt(x,z)+radius*0.075, z); expoGrupo.add(poste);
+    const lb=etiqueta(rc.nombre+'\n'+Math.round(pct)+' %','#ffffff'); lb.position.set(x,hAt(x,z)+radius*0.2,z); expoGrupo.add(lb);
+    recInfo.push({n:rc.nombre,dist,sec,pct});
+  });
+  scene.add(expoGrupo);
+  // panel
+  const orden=SECT.slice().sort((a,b)=>tot[b]-tot[a]);
+  document.getElementById('expoTop').innerHTML = suma ?
+    'Sector más expuesto: <b style="color:#'+colorRel(1).getHexString()+'">hacia el '+SECT_NOMBRE[orden[0]]+'</b> ('+Math.round(100*tot[orden[0]]/suma)+' % de la intensidad). Los vecinos ubicados al '+SECT_NOMBRE[orden[0]].toLowerCase()+' del relleno fueron los que más recibieron el viento que pasa sobre el frente de trabajo.' :
+    'En el periodo solo hubo calmas o direcciones sin dato: no hay sector expuesto.';
+  document.getElementById('expoTab').innerHTML = '<tr style="color:#9aa0a6"><td>Hacia</td><td style="text-align:right">km/h acum.</td><td style="text-align:right">%</td></tr>'+
+    orden.map(s=>'<tr><td><span style="display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;background:#'+colorRel(tot[s]/max).getHexString()+'"></span>'+SECT_NOMBRE[s]+'</td><td style="text-align:right">'+tot[s].toFixed(1)+'</td><td style="text-align:right">'+(suma?Math.round(100*tot[s]/suma):0)+'</td></tr>').join('');
+  document.getElementById('expoRec').innerHTML = recInfo.length ?
+    '<b>Vecinos registrados</b><br>'+recInfo.sort((a,b)=>b.pct-a.pct).map(r=>r.n+': '+Math.round(r.pct)+' % · '+Math.round(r.dist)+' m al '+SECT_NOMBRE[r.sec]).join('<br>') :
+    '<span style="color:#9aa0a6">Aún no hay vecinos georreferenciados en el visor; cuando se carguen sus coordenadas aparecerán aquí con su porcentaje de exposición.</span>';
+}
+
+// ---- coordenadas: UTM 18N → geográficas → MAGNA-SIRGAS Origen Nacional (EPSG:9377) ----
+const A_ELIP=6378137, F_ELIP=1/298.257222101, E2=F_ELIP*(2-F_ELIP), EP2=E2/(1-E2);
+function arcoMeridiano(f){
+  return A_ELIP*((1-E2/4-3*E2*E2/64-5*E2**3/256)*f-(3*E2/8+3*E2*E2/32+45*E2**3/1024)*Math.sin(2*f)
+    +(15*E2*E2/256+45*E2**3/1024)*Math.sin(4*f)-(35*E2**3/3072)*Math.sin(6*f));
+}
+function utmAGeo(E,N,zona){
+  const k0=0.9996, x=E-500000, M=N/k0, mu=M/(A_ELIP*(1-E2/4-3*E2*E2/64-5*E2**3/256));
+  const e1=(1-Math.sqrt(1-E2))/(1+Math.sqrt(1-E2));
+  const f1=mu+(3*e1/2-27*e1**3/32)*Math.sin(2*mu)+(21*e1*e1/16-55*e1**4/32)*Math.sin(4*mu)+(151*e1**3/96)*Math.sin(6*mu);
+  const C1=EP2*Math.cos(f1)**2, T1=Math.tan(f1)**2, N1=A_ELIP/Math.sqrt(1-E2*Math.sin(f1)**2), R1=A_ELIP*(1-E2)/(1-E2*Math.sin(f1)**2)**1.5, D=x/(N1*k0);
+  const lat=f1-(N1*Math.tan(f1)/R1)*(D*D/2-(5+3*T1+10*C1-4*C1*C1-9*EP2)*D**4/24+(61+90*T1+298*C1+45*T1*T1-252*EP2-3*C1*C1)*D**6/720);
+  const lon=(D-(1+2*T1+C1)*D**3/6+(5-2*C1+28*T1-3*C1*C1+8*EP2+24*T1*T1)*D**5/120)/Math.cos(f1);
+  return {lat:lat*180/Math.PI, lon:(zona*6-183)+lon*180/Math.PI};
+}
+function geoATM(lat,lon,lat0,lon0,k0,FE,FN){
+  const f=lat*Math.PI/180, l=(lon-lon0)*Math.PI/180;
+  const Nn=A_ELIP/Math.sqrt(1-E2*Math.sin(f)**2), T=Math.tan(f)**2, C=EP2*Math.cos(f)**2, Aa=l*Math.cos(f);
+  const M=arcoMeridiano(f), M0=arcoMeridiano(lat0*Math.PI/180);
+  const x=FE+k0*Nn*(Aa+(1-T+C)*Aa**3/6+(5-18*T+T*T+72*C-58*EP2)*Aa**5/120);
+  const y=FN+k0*(M-M0+Nn*Math.tan(f)*(Aa*Aa/2+(5-T+9*C+4*C*C)*Aa**4/24+(61-58*T+T*T+600*C-330*EP2)*Aa**6/720));
+  return {e:x,n:y};
+}
+const rayC = new THREE.Raycaster(), mC = new THREE.Vector2(); let ultCoord=0;
+canvas.addEventListener('pointermove', e=>{
+  if(!modeloListo||performance.now()-ultCoord<120) return; ultCoord=performance.now();
+  mC.set(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1);
+  rayC.setFromCamera(mC, camera);
+  const hit = rayC.intersectObjects(scene.children.filter(o=>o!==windLines&&o!==rainPts&&o!==expoGrupo), true)[0];
+  const el=document.getElementById('coord'); el.style.display='block';
+  if(!hit){ el.textContent='Pase el cursor sobre el terreno'; return; }
+  const p=hit.point, E=ORIGEN_UTM.e+p.x+geoShift.x, N=ORIGEN_UTM.n-(p.z+geoShift.z), Z=p.y+geoShift.y;
+  const g=utmAGeo(E,N,ORIGEN_UTM.zona), o=geoATM(g.lat,g.lon,4,-73,0.9992,5000000,2000000);
+  el.innerHTML='UTM 18N (WGS84): E '+E.toFixed(1)+' · N '+N.toFixed(1)+'<br>MAGNA-SIRGAS Origen Nacional (EPSG:9377): E '+o.e.toFixed(1)+' · N '+o.n.toFixed(1)+
+    '<br>Lat '+g.lat.toFixed(6)+'° · Lon '+g.lon.toFixed(6)+'° · Cota '+Z.toFixed(1)+' m';
+});
+
+window.addEventListener('message', ev=>{
+  const d = ev.data;
+  if (d && d.tipo === 'vera-viento' && Array.isArray(d.lecturas)) aplicarLecturas(d.lecturas);
+});
+if (MODO_TABLERO) {
+  document.getElementById('met').remove();          // sin controles: los parámetros vienen de la estación
+  document.getElementById('bWind').remove();
+  document.querySelector('#ui button[onclick]').remove();
+  document.querySelector('header').style.display='none';
+  ['hud','expo'].forEach(id=>document.getElementById(id).style.display='block');
+  LECT_RAW = leerDatosHash();
+  LECTURAS = prepararLecturas(LECT_RAW);
+  pintarLinea();
+}
+
 let lastT = performance.now();
 renderer.setAnimationLoop(()=>{
   const now = performance.now(), dt = Math.min(0.05,(now-lastT)/1000); lastT = now;
   controls.update();
+  if (MODO_TABLERO && LECTURAS.length) {
+    tLect += dt;
+    if (tLect >= SEG_POR_LECTURA) { tLect = 0; idxLect = (idxLect+1) % LECTURAS.length; mostrarLectura(); }
+  }
   if(windOn && windLines) stepWind(dt);
+  document.getElementById('brujulaSvg').style.transform = 'rotate('+(controls.getAzimuthalAngle()*180/Math.PI)+'deg)';
   renderer.render(scene, camera);
 });
 </script>
