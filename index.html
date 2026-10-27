@@ -332,7 +332,7 @@ function leerDatosHash(){
 }
 function prepararLecturas(arr){
   return (arr||[]).map(r=>({t:String(r.t||''), dir:normDir(r.dir), dirTxt:String(r.dir||''),
-      kmh:(+r.avg||0)*1.609, raf:(+r.gust||0)*1.609, mm:(+r.rin||0)*25.4}))
+      kmh:(+r.avg||0)*1.609, raf:(+r.gust||0)*1.609, mm:(+r.rin||0)*25.4, reinicio:!!r.reinicio}))
     .filter(r=>r.t).sort((a,b)=>a.t<b.t?-1:1);
 }
 function aplicarLecturas(arr){
@@ -354,7 +354,7 @@ function mostrarLectura(){
     (!r.dir ? 'Dirección sin dato reconocible ('+(r.dirTxt||'vacío')+')' : r.kmh<=0 ? '<b>Calma</b> (0 km/h)' :
       'Viene del <b>'+SECT_NOMBRE[r.dir]+'</b> y sopla hacia el <b>'+SECT_NOMBRE[hacia]+'</b>')+
     '<br>Velocidad media <b>'+r.kmh.toFixed(1)+' km/h</b> · ráfaga '+r.raf.toFixed(1)+' km/h'+
-    '<br>Lluvia registrada '+r.mm.toFixed(1)+' mm';
+    '<br>Lluvia desde la lectura anterior '+r.mm.toFixed(1)+' mm'+(r.reinicio?' <span style="color:#ffb45c">(reinicio del contador)</span>':'');
   [...document.getElementById('hudLinea').children].forEach((c,i)=>c.style.opacity = i===idxLect?1:0.35);
 }
 function pintarLinea(){
